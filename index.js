@@ -307,9 +307,17 @@ async function sendAlert(channel, analysis, alertType) {
   const alertName = alertTypeNames[alertType] || 'Volatility Alert';
   const title = cleanSymbol + '/USDT - (' + alertName + ')';
   
+  // determine color based on price direction
+  let embedColor;
+  if (alertType === 'fast_move') {
+    embedColor = analysis.priceChange5m >= 0 ? 0x00ff00 : 0xff0000; // green for up, red for down
+  } else {
+    embedColor = analysis.priceChange15m >= 0 ? 0x00ff00 : 0xff0000;
+  }
+  
   const embed = new EmbedBuilder()
     .setTitle(title)
-    .setColor(0x000000)
+    .setColor(embedColor)
     .setTimestamp()
     .setFooter({ text: 'Volatility Monitor' });
   
