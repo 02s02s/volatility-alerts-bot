@@ -1,9 +1,20 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  Events
+} = require('discord.js');
 const axios = require('axios');
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers
+  ]
 });
 
 client.on('error', (error) => {
@@ -11,8 +22,11 @@ client.on('error', (error) => {
 });
 
 const BYBIT_BASE = 'https://api.bybit.com';
-const ALERT_CHANNEL_ID = process.env.ALERT_CHANNEL_ID;
-const ALERT_ROLE_ID = process.env.ALERT_ROLE_ID || null;
+
+const BULLISH_ALERT_CHANNEL_ID = process.env.BULLISH_ALERT_CHANNEL_ID;
+const BEARISH_ALERT_CHANNEL_ID = process.env.BEARISH_ALERT_CHANNEL_ID;
+const BULLISH_ALERT_ROLE_ID = process.env.BULLISH_ALERT_ROLE_ID;
+const BEARISH_ALERT_ROLE_ID = process.env.BEARISH_ALERT_ROLE_ID;
 
 const THRESHOLDS = {
   BIG_MOVE: 5,
@@ -293,7 +307,7 @@ async function generateChartUrl(symbol) {
   }
 }
 
-async function sendAlert(channel, analysis, alertType) {
+async function sendAlert(analysis, alertType) {
   let cleanSymbol = analysis.symbol.replace('USDT', '');
   if (cleanSymbol.endsWith('PERP')) {
     cleanSymbol = cleanSymbol.slice(0, -4);
@@ -307,21 +321,26 @@ async function sendAlert(channel, analysis, alertType) {
   const alertName = alertTypeNames[alertType] || 'Volatility Alert';
   const title = cleanSymbol + '/USDT - (' + alertName + ')';
   
-  // determine color based on price direction
-  let embedColor;
-  if (alertType === 'fast_move') {
-    embedColor = analysis.priceChange5m >= 0 ? 0x00ff00 : 0xff0000; // green for up, red for down
-  } else {
-    embedColor = analysis.priceChange15m >= 0 ? 0x00ff00 : 0xff0000;
-  }
+  const priceChange = (alertType === 'fast_move') ? analysis.priceChange5m : analysis.priceChange15m;
+  const isBullish = priceChange >= 0;
   
+  const embedColor = isBullish ? 0x00ff00 : 0xff0000;
+  const direction = isBullish ? 'bullish' : 'bearish';
+  const channelId = isBullish ? BULLISH_ALERT_CHANNEL_ID : BEARISH_ALERT_CHANNEL_ID;
+  const roleId = isBullish ? BULLISH_ALERT_ROLE_ID : BEARISH_ALERT_ROLE_ID;
+  
+  const channel = await client.channels.fetch(channelId);
+  if (!channel) {
+    console.error(`Cannot find channel ID: ${channelId}`);
+    return;
+  }
+
   const embed = new EmbedBuilder()
     .setTitle(title)
     .setColor(embedColor)
     .setTimestamp()
-    .setFooter({ text: 'Volatility Monitor' });
+    .setFooter({ text: 'Volatility Monitor • Powered by <:AUnityAcademy:1189968810590081224> • discord.gg/unityacademy' });
   
-  // format price based on its value
   let priceValue;
   if (analysis.price < 0.01) {
     priceValue = '$' + analysis.price.toFixed(6);
@@ -363,19 +382,26 @@ async function sendAlert(channel, analysis, alertType) {
   if (chartUrl) {
     embed.setImage(chartUrl);
   }
+
+  const button = new ButtonBuilder()
+    .setCustomId(`toggle_role_${direction}`)
+    .setLabel('Get Alerts')
+    .setStyle(ButtonStyle.Secondary);
+    
+  const row = new ActionRowBuilder().addComponents(button);
   
   try {
-    const messagePayload = { embeds: [embed] };
+    const messagePayload = { embeds: [embed], components: [row] };
     
-    if (ALERT_ROLE_ID) {
-      messagePayload.content = '<@&' + ALERT_ROLE_ID + '>';
+    if (roleId) {
+      messagePayload.content = `<@&${roleId}>`;
     }
     
     await channel.send(messagePayload);
-    console.log('sent alert for ' + cleanSymbol + ' (' + alertType + ')');
+    console.log(`sent ${direction} alert for ${cleanSymbol} (${alertType})`);
     alertCooldowns.set(analysis.symbol, Date.now());
   } catch (error) {
-    console.error('failed to send alert for ' + cleanSymbol + ':', error.message);
+    console.error(`failed to send alert for ${cleanSymbol}:`, error.message);
   }
 }
 
@@ -385,12 +411,6 @@ async function monitorMarket() {
   console.log('\nscanning ' + new Date().toLocaleTimeString());
   
   try {
-    const channel = await client.channels.fetch(ALERT_CHANNEL_ID);
-    if (!channel) {
-      console.error('cant find alert channel');
-      return;
-    }
-    
     const marketData = await fetchMarketData();
     console.log('checking ' + marketData.length + ' symbols');
     
@@ -420,7 +440,7 @@ async function monitorMarket() {
           
           console.log('  ' + analysis.symbol + ' | 5m: ' + change5m + ' | 15m: ' + change15m + ' | vol: ' + volSpike + ' | ' + alertType);
           
-          await sendAlert(channel, analysis, alertType);
+          await sendAlert(analysis, alertType);
           alertsSent++;
           await new Promise(resolve => setTimeout(resolve, 2000));
         }
@@ -447,21 +467,77 @@ async function monitorMarket() {
   setTimeout(monitorMarket, 60 * 1000);
 }
 
+client.on(Events.InteractionCreate, async interaction => {
+  if (!interaction.isButton()) return;
+  
+  const { customId, member, guild } = interaction;
+  
+  if (!customId.startsWith('toggle_role_')) return;
+
+  try {
+    const roleType = customId.split('_')[2];
+    const roleId = (roleType === 'bullish') ? BULLISH_ALERT_ROLE_ID : BEARISH_ALERT_ROLE_ID;
+
+    if (!roleId) {
+      await interaction.reply({ content: 'Error: Alert role is not configured.', ephemeral: true });
+      return;
+    }
+
+    const role = await guild.roles.fetch(roleId);
+    if (!role) {
+      await interaction.reply({ content: 'Error: Could not find the alert role.', ephemeral: true });
+      return;
+    }
+
+    const hasRole = member.roles.cache.has(roleId);
+
+    if (hasRole) {
+      await member.roles.remove(role);
+      await interaction.reply({
+        content: `❌ Removed role <@&${role.id}>`,
+        ephemeral: true
+      });
+    } else {
+      await member.roles.add(role);
+      await interaction.reply({
+        content: `✅ Added role <@&${role.id}>`,
+        ephemeral: true
+      });
+    }
+  } catch (error) {
+    console.error('Failed to toggle role:', error);
+    await interaction.reply({
+      content: 'There was an error trying to update your roles. Please try again.',
+      ephemeral: true
+    });
+  }
+});
+
 client.once('clientReady', async () => {
   console.log('\nlogged in as ' + client.user.tag);
   console.log('connected to ' + client.guilds.cache.size + ' servers');
-  console.log('channel: ' + ALERT_CHANNEL_ID);
-  if (ALERT_ROLE_ID) {
-    console.log('role ping: ' + ALERT_ROLE_ID);
-  }
-  console.log('');
   
   try {
-    const channel = await client.channels.fetch(ALERT_CHANNEL_ID);
-    console.log('monitoring: #' + channel.name);
+    const bullishChannel = await client.channels.fetch(BULLISH_ALERT_CHANNEL_ID);
+    console.log(`monitoring bullish: #${bullishChannel.name}`);
   } catch (error) {
-    console.error('cant find alert channel, check .env');
+    console.error('cant find bullish alert channel, check .env');
     process.exit(1);
+  }
+  
+  try {
+    const bearishChannel = await client.channels.fetch(BEARISH_ALERT_CHANNEL_ID);
+    console.log(`monitoring bearish: #${bearishChannel.name}`);
+  } catch (error) {
+    console.error('cant find bearish alert channel, check .env');
+    process.exit(1);
+  }
+  
+  if (BULLISH_ALERT_ROLE_ID) {
+    console.log('bullish role ping: ' + BULLISH_ALERT_ROLE_ID);
+  }
+  if (BEARISH_ALERT_ROLE_ID) {
+    console.log('bearish role ping: ' + BEARISH_ALERT_ROLE_ID);
   }
   
   console.log('\ntriggers:');
