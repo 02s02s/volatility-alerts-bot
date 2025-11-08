@@ -339,7 +339,7 @@ async function sendAlert(analysis, alertType) {
     .setTitle(title)
     .setColor(embedColor)
     .setTimestamp()
-    .setFooter({ text: 'Volatility Monitor • Powered by <:AUnityAcademy:1189968810590081224> • discord.gg/unityacademy' });
+    .setFooter({ text: 'Volatility Monitor • Powered by Unity • discord.gg/unityacademy' });
   
   let priceValue;
   if (analysis.price < 0.01) {
