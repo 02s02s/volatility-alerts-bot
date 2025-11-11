@@ -2,11 +2,7 @@ require('dotenv').config();
 const {
   Client,
   GatewayIntentBits,
-  EmbedBuilder,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  Events
+  EmbedBuilder
 } = require('discord.js');
 const axios = require('axios');
 
@@ -29,8 +25,8 @@ const BULLISH_ALERT_ROLE_ID = process.env.BULLISH_ALERT_ROLE_ID;
 const BEARISH_ALERT_ROLE_ID = process.env.BEARISH_ALERT_ROLE_ID;
 
 const THRESHOLDS = {
-  BIG_MOVE: 5,
-  FAST_MOVE: 3
+  BIG_MOVE: 6,
+  FAST_MOVE: 4
 };
 
 const alertCooldowns = new Map();
@@ -113,18 +109,19 @@ function calculateTicks(klines) {
 }
 
 async function analyzeSymbol(symbol) {
+  const klines1m = await getRecentKlineData(symbol, '1', 30);
   const klines5m = await getRecentKlineData(symbol, '5', 30);
   const klines15m = await getRecentKlineData(symbol, '15', 5);
   
-  if (!klines5m || !klines15m || klines5m.length < 10) return null;
+  if (!klines1m || !klines5m || !klines15m || klines5m.length < 10) return null;
   
   const currentPrice = klines5m[0].close;
   
-  const oldPrice5m = klines5m[0].open;
-  const priceChange5m = ((currentPrice - oldPrice5m) / oldPrice5m) * 100;
+  const oldPrice3m = klines1m[2].open;
+  const priceChange3m = ((currentPrice - oldPrice3m) / oldPrice3m) * 100;
   
-  const oldPrice15m = klines5m[2].open;
-  const priceChange15m = ((currentPrice - oldPrice15m) / oldPrice15m) * 100;
+  const oldPrice10m = klines5m[1].open;
+  const priceChange10m = ((currentPrice - oldPrice10m) / oldPrice10m) * 100;
   
   const volatility15m = calculateVolatility(klines15m);
   const ticks5m = calculateTicks(klines5m.slice(0, 1));
@@ -144,8 +141,8 @@ async function analyzeSymbol(symbol) {
     price: currentPrice,
     ticks5m,
     volatility15m,
-    priceChange5m,
-    priceChange15m,
+    priceChange3m,
+    priceChange10m,
     volume5m,
     volume15m,
     volumeSpike
@@ -155,11 +152,11 @@ async function analyzeSymbol(symbol) {
 function shouldAlert(analysis) {
   if (analysis.volume15m < 50000) return null;
   
-  if (Math.abs(analysis.priceChange15m) >= THRESHOLDS.BIG_MOVE) {
+  if (Math.abs(analysis.priceChange10m) >= THRESHOLDS.BIG_MOVE) {
     return 'big_move';
   }
   
-  if (Math.abs(analysis.priceChange5m) >= THRESHOLDS.FAST_MOVE && analysis.volumeSpike > 50) {
+  if (Math.abs(analysis.priceChange3m) >= THRESHOLDS.FAST_MOVE && analysis.volumeSpike > 50) {
     return 'fast_move';
   }
   
@@ -321,7 +318,7 @@ async function sendAlert(analysis, alertType) {
   const alertName = alertTypeNames[alertType] || 'Volatility Alert';
   const title = cleanSymbol + '/USDT - (' + alertName + ')';
   
-  const priceChange = (alertType === 'fast_move') ? analysis.priceChange5m : analysis.priceChange15m;
+  const priceChange = (alertType === 'fast_move') ? analysis.priceChange3m : analysis.priceChange10m;
   const isBullish = priceChange >= 0;
   
   const embedColor = isBullish ? 0x00ff00 : 0xff0000;
@@ -352,13 +349,13 @@ async function sendAlert(analysis, alertType) {
   
   if (alertType === 'fast_move') {
     const ticksValue = analysis.ticks5m.toLocaleString();
-    const changeValue = (analysis.priceChange5m >= 0 ? '+' : '') + analysis.priceChange5m.toFixed(4) + '%';
+    const changeValue = (analysis.priceChange3m >= 0 ? '+' : '') + analysis.priceChange3m.toFixed(4) + '%';
     const volumeIncValue = (analysis.volumeSpike >= 0 ? '+' : '') + analysis.volumeSpike.toFixed(2) + '%';
     const volumeValue = Math.floor(analysis.volume15m).toLocaleString() + '$';
     
     embed.addFields(
       { name: 'Price', value: priceValue, inline: true },
-      { name: 'Change 5m', value: changeValue, inline: true },
+      { name: 'Change 3m', value: changeValue, inline: true },
       { name: 'Ticks 5m', value: ticksValue, inline: true },
       { name: 'Volume Increase', value: volumeIncValue, inline: true },
       { name: 'Volume 15m', value: volumeValue, inline: true }
@@ -366,12 +363,12 @@ async function sendAlert(analysis, alertType) {
   } else {
     const ticksValue = analysis.ticks5m.toLocaleString();
     const volatilityValue = analysis.volatility15m.toFixed(4);
-    const changeValue = (analysis.priceChange15m >= 0 ? '+' : '') + analysis.priceChange15m.toFixed(4) + '%';
+    const changeValue = (analysis.priceChange10m >= 0 ? '+' : '') + analysis.priceChange10m.toFixed(4) + '%';
     const volumeValue = Math.floor(analysis.volume15m).toLocaleString() + '$';
     
     embed.addFields(
       { name: 'Price', value: priceValue, inline: true },
-      { name: 'Change 15m', value: changeValue, inline: true },
+      { name: 'Change 10m', value: changeValue, inline: true },
       { name: 'Ticks 5m', value: ticksValue, inline: true },
       { name: 'Volatility 15m', value: volatilityValue, inline: true },
       { name: 'Volume 15m', value: volumeValue, inline: true }
@@ -382,16 +379,9 @@ async function sendAlert(analysis, alertType) {
   if (chartUrl) {
     embed.setImage(chartUrl);
   }
-
-  const button = new ButtonBuilder()
-    .setCustomId(`toggle_role_${direction}`)
-    .setLabel('Get Alerts')
-    .setStyle(ButtonStyle.Secondary);
-    
-  const row = new ActionRowBuilder().addComponents(button);
   
   try {
-    const messagePayload = { embeds: [embed], components: [row] };
+    const messagePayload = { embeds: [embed] };
     
     if (roleId) {
       messagePayload.content = `<@&${roleId}>`;
@@ -434,11 +424,11 @@ async function monitorMarket() {
             continue;
           }
           
-          const change5m = (analysis.priceChange5m >= 0 ? '+' : '') + analysis.priceChange5m.toFixed(2) + '%';
-          const change15m = (analysis.priceChange15m >= 0 ? '+' : '') + analysis.priceChange15m.toFixed(2) + '%';
+          const change3m = (analysis.priceChange3m >= 0 ? '+' : '') + analysis.priceChange3m.toFixed(2) + '%';
+          const change10m = (analysis.priceChange10m >= 0 ? '+' : '') + analysis.priceChange10m.toFixed(2) + '%';
           const volSpike = analysis.volumeSpike.toFixed(0) + '%';
           
-          console.log('  ' + analysis.symbol + ' | 5m: ' + change5m + ' | 15m: ' + change15m + ' | vol: ' + volSpike + ' | ' + alertType);
+          console.log('  ' + analysis.symbol + ' | 3m: ' + change3m + ' | 10m: ' + change10m + ' | vol: ' + volSpike + ' | ' + alertType);
           
           await sendAlert(analysis, alertType);
           alertsSent++;
@@ -466,52 +456,6 @@ async function monitorMarket() {
   console.log('waiting 1 min before next scan...\n');
   setTimeout(monitorMarket, 60 * 1000);
 }
-
-client.on(Events.InteractionCreate, async interaction => {
-  if (!interaction.isButton()) return;
-  
-  const { customId, member, guild } = interaction;
-  
-  if (!customId.startsWith('toggle_role_')) return;
-
-  try {
-    const roleType = customId.split('_')[2];
-    const roleId = (roleType === 'bullish') ? BULLISH_ALERT_ROLE_ID : BEARISH_ALERT_ROLE_ID;
-
-    if (!roleId) {
-      await interaction.reply({ content: 'Error: Alert role is not configured.', ephemeral: true });
-      return;
-    }
-
-    const role = await guild.roles.fetch(roleId);
-    if (!role) {
-      await interaction.reply({ content: 'Error: Could not find the alert role.', ephemeral: true });
-      return;
-    }
-
-    const hasRole = member.roles.cache.has(roleId);
-
-    if (hasRole) {
-      await member.roles.remove(role);
-      await interaction.reply({
-        content: `❌ Removed role <@&${role.id}>`,
-        ephemeral: true
-      });
-    } else {
-      await member.roles.add(role);
-      await interaction.reply({
-        content: `✅ Added role <@&${role.id}>`,
-        ephemeral: true
-      });
-    }
-  } catch (error) {
-    console.error('Failed to toggle role:', error);
-    await interaction.reply({
-      content: 'There was an error trying to update your roles. Please try again.',
-      ephemeral: true
-    });
-  }
-});
 
 client.once('clientReady', async () => {
   console.log('\nlogged in as ' + client.user.tag);
@@ -541,8 +485,8 @@ client.once('clientReady', async () => {
   }
   
   console.log('\ntriggers:');
-  console.log('  big move: ' + THRESHOLDS.BIG_MOVE + '%+ in 15m');
-  console.log('  fast move: ' + THRESHOLDS.FAST_MOVE + '%+ in 5m with volume spike');
+  console.log('  big move: ' + THRESHOLDS.BIG_MOVE + '%+ in 10m');
+  console.log('  fast move: ' + THRESHOLDS.FAST_MOVE + '%+ in 3m with volume spike');
   console.log('  min volume: $50k');
   console.log('  cooldown: ' + (COOLDOWN_MS / 60000) + ' min per coin');
   console.log('  scan cycle: continuous with 1min rest\n');
